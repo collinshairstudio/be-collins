@@ -1,3 +1,0 @@
-kira kira begini
-
-server.js -> routes/*.js -> controllers/*.js -> service/*.js

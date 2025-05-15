@@ -1,23 +1,53 @@
 require('dotenv').config();
-
 const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const route = require('./routes/route');
+const supabase = require('./database');
+const errorHandler = require('./middlewares/errorHandler');
+
 const app = express();
-const swaggerUi = require('swagger-ui-express');
-const swaggerSpec = require('./docs/swagger');
-const path = require('path');
 
-app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-app.get('/', (req, res) => {
-  res.send('Hello from Server collins');
+const authRouter = require('./routes/authRoutes');
+const bookingRouter = require('./routes/bookingRoutes');
+
+app.use('/api/auth', authRouter);
+app.use('/api/bookings', bookingRouter);
+
+app.get('/', async (req, res) => {
+  try {
+    const { data: users, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .limit(1);
+
+    const { data: bookings, error: bookingError } = await supabase
+      .from('bookings')
+      .select('id')
+      .limit(1);
+
+    if (userError || bookingError) throw userError || bookingError;
+
+    res.status(200).json({
+      status: 'healthy',
+      database: {
+        users: users.length > 0 ? 'connected' : 'no_data',
+        bookings: bookings.length > 0 ? 'connected' : 'no_data'
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
-// Route untuk API
-app.use('/v1/api', route);
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
+});
