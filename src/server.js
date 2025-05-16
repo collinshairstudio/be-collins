@@ -2,8 +2,16 @@ require('dotenv').config();
 const express = require('express');
 const supabase = require('./database');
 const errorHandler = require('./middlewares/errorHandler');
+const cors = require('cors');
 
 const app = express();
+
+app.use(cors({
+  origin: 'http://localhost:3000',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+}));
 
 app.use(express.json());
 

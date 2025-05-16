@@ -14,6 +14,7 @@ exports.register = async (userData) => {
     .insert([{
       username: userData.username,
       email: userData.email,
+      phone: userData.phone,
       password: hashedPassword,
       role_id: 3
     }])
