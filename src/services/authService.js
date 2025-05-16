@@ -6,9 +6,18 @@ exports.register = async (userData) => {
   if (userData.password !== userData.passwordConfirm) {
     throw new Error('Passwords do not match');
   }
-
+  const { data: existingUsers, error: checkError } = await supabase
+    .from('users')
+    .select('email')
+    .eq('email', userData.email)
+    .maybeSingle();
+  
+  if (checkError) throw checkError;
+  if (existingUsers) {
+    throw new Error('Email already in use');
+  }
   const hashedPassword = await bcrypt.hash(userData.password, 10);
-
+  
   const { data, error } = await supabase
     .from('users')
     .insert([{
@@ -19,7 +28,7 @@ exports.register = async (userData) => {
       role_id: 3
     }])
     .select();
-
+  
   if (error) throw error;
   return data[0];
 };
