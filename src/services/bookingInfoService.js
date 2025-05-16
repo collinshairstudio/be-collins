@@ -78,16 +78,14 @@ exports.getAvailableSchedules = async (capsterId, date) => {
       .lte('schedule', endOfDay);
 
     if (bookingError) throw bookingError;
-
-    const allSlots = generateTimeSlots('09:00', '18:00', 60); // -> interval 60 menit
-
+    const allSlots = generateTimeSlots('09:00', '18:00', 60);
     const bookedSlots = bookings.map(b => moment(b.schedule).format('HH:mm'));
+
+    const now = moment();
     const availableSlots = allSlots.filter(slot => {
       const isBooked = bookedSlots.includes(slot.time);
-      
       const slotDateTime = moment(`${date} ${slot.time}`, 'YYYY-MM-DD HH:mm');
-      const isFutureTime = slotDateTime.isAfter(moment());
-      
+      const isFutureTime = slotDateTime.isAfter(now);
       return !isBooked && isFutureTime;
     });
 
