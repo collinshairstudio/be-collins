@@ -1,84 +1,166 @@
 const supabase = require('../database');
+const moment = require('moment');
 
 exports.createBooking = async (bookingData) => {
   try {
-    // Validasi 1: Cek apakah capster_id dan schedule ada
-    if (!bookingData.capster_id || !bookingData.schedule) {
+    console.log('Received booking data:', bookingData);
+
+    // Validasi field yang diperlukan
+    if (!bookingData.capster_id || !bookingData.service_id || !bookingData.date || !bookingData.time) {
       throw { 
-        message: 'Capster ID and schedule are required',
+        message: 'All fields are required (capster_id, service_id, date, time)',
         statusCode: 400
       };
     }
 
-    // Validasi 2: Cek apakah capster ada
-    const { count: capsterExists, error: capsterError } = await supabase
-      .from('capsters')
-      .select('*', { count: 'exact' })
-      .eq('id', bookingData.capster_id);
-
-    if (capsterError) throw { message: 'Database error', statusCode: 500, details: capsterError };
-    if (capsterExists === 0) {
-      throw { message: 'Capster not found', statusCode: 404 };
+    // Konversi ke integer
+    const capsterId = parseInt(bookingData.capster_id, 10);
+    const serviceId = parseInt(bookingData.service_id, 10);
+    
+    if (isNaN(capsterId)) {
+      throw { message: 'capster_id must be a valid integer', statusCode: 400 };
     }
 
-    // Validasi 3: Cek duplikat booking
-    const { data: duplicateData, count: duplicateCount, error: duplicateError } = await supabase
+    if (isNaN(serviceId)) {
+      throw { message: 'service_id must be a valid integer', statusCode: 400 };
+    }
+
+    // Validasi UUID
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(bookingData.user_id)) {
+      throw { message: 'user_id must be a valid UUID', statusCode: 400 };
+    }
+
+    const scheduleDateTime = moment(`${bookingData.date} ${bookingData.time}`, 'YYYY-MM-DD h:mm A').toISOString();
+    
+    // Cek capster
+    const { data: barber, error: barberError } = await supabase
+      .from('capsters')
+      .select('*')
+      .eq('id', capsterId)
+      .single();
+
+    if (barberError) throw { message: 'Database error', statusCode: 500, details: barberError };
+    if (!barber) throw { message: 'Barber not found', statusCode: 404 };
+
+    // Cek service (tanpa duration)
+    const { data: service, error: serviceError } = await supabase
+      .from('services')
+      .select('id, name') // Hanya ambil field yang diperlukan
+      .eq('id', serviceId)
+      .single();
+
+    if (serviceError) throw { message: 'Database error', statusCode: 500, details: serviceError };
+    if (!service) throw { message: 'Service not found', statusCode: 404 };
+
+    // Cek duplikat booking
+    const { count: duplicateCount, error: duplicateError } = await supabase
       .from('bookings')
       .select('*', { count: 'exact' })
-      .eq('capster_id', bookingData.capster_id)
-      .eq('schedule', bookingData.schedule);
+      .eq('capster_id', capsterId)
+      .eq('schedule', scheduleDateTime);
 
     if (duplicateError) throw { message: 'Database error', statusCode: 500, details: duplicateError };
     if (duplicateCount > 0) {
-      throw { message: 'Capster already booked at this time', statusCode: 409 };
-    }
-
-    // Validasi 4: Cek jumlah booking user
-    if (!bookingData.userId) {
-      throw { message: 'User ID is required', statusCode: 400 };
-    }
-
-    const { count: userBookingCount, error: countError } = await supabase
-      .from('bookings')
-      .select('*', { count: 'exact' })
-      .eq('user_id', bookingData.userId);
-
-    if (countError) throw { message: 'Database error', statusCode: 500, details: countError };
-    if (userBookingCount >= 2) {
       throw { 
-        message: 'Maximum booking limit reached (2 bookings per user)', 
-        statusCode: 429 
+        message: 'Barber already booked at this time', 
+        statusCode: 409,
+        details: { capster_id: capsterId, schedule: scheduleDateTime }
       };
     }
 
-    // Buat booking
+    // Validasi waktu booking
+    if (moment(scheduleDateTime).isBefore(moment())) {
+      throw { message: 'Cannot book in the past', statusCode: 400 };
+    }
+
+    // Cek limit booking user
+    const { count: userBookingCount, error: countError } = await supabase
+      .from('bookings')
+      .select('*', { count: 'exact' })
+      .eq('user_id', bookingData.user_id)
+      .gte('schedule', moment().startOf('day').toISOString());
+
+    if (countError) throw { message: 'Database error', statusCode: 500, details: countError };
+    if (userBookingCount >= 2) {
+      throw { message: 'Maximum booking limit reached (2 active bookings per user)', statusCode: 429 };
+    }
+
+    // Buat booking (tanpa duration dan price)
     const { data, error: insertError } = await supabase
       .from('bookings')
       .insert([{
-        user_id: bookingData.userId,
-        capster_id: bookingData.capster_id,
-        schedule: bookingData.schedule
+        user_id: bookingData.user_id,
+        capster_id: capsterId,
+        service_id: serviceId,
+        schedule: scheduleDateTime,
+        status: 'confirmed'
       }])
       .select();
 
     if (insertError) throw { message: 'Failed to create booking', statusCode: 500, details: insertError };
     if (!data || data.length === 0) throw { message: 'No data returned after insert', statusCode: 500 };
 
-    return data[0];
+    return {
+      success: true,
+      data: {
+        booking: data[0],
+        barber: { id: barber.id, name: barber.name, image: barber.image },
+        service: { id: service.id, name: service.name } // Tanpa duration
+      }
+    };
 
   } catch (error) {
-    // Log error for debugging
     console.error('Booking error:', error);
-    
-    // Pastikan error memiliki format yang diharapkan
-    const formattedError = {
-      message: error.message || 'Unknown error occurred',
-      statusCode: error.statusCode || 500
+    throw {
+      success: false,
+      error: {
+        message: error.message || 'Unknown error occurred',
+        statusCode: error.statusCode || 500,
+        details: error.details || null
+      }
     };
-    
-    throw formattedError;
   }
 };
+
+exports.getBookingByUser = async (userId) => {
+  try {
+    const { data, error } = await supabase
+      .from('bookings')
+      .select(`
+        id,
+        schedule,
+        status,
+        barber:capster_id (id, name),
+        service:service_id (id, name, price, duration)
+      `)
+      .eq('user_id', userId)
+      .order('schedule', { ascending: true })
+
+    if (error) {
+      throw {
+        message: 'Failed to get bookings',
+        statusCode: 500,
+        details: error
+      }
+    }
+
+    return {
+      success: true,
+      data: data || []
+    }
+  } catch (error) {
+    console.error('Service error:', error)
+    return {
+      success: false,
+      error: {
+        message: error.message || 'Unknown error occurred',
+        statusCode: error.statusCode || 500,
+        details: error.details || null
+      }
+    }
+  }
+}
 
 // Fungsi-fungsi lainnya tetap sama...
 exports.getUserBookings = async (userId) => {
@@ -89,15 +171,31 @@ exports.getUserBookings = async (userId) => {
 
     const { data, error } = await supabase
       .from('bookings')
-      .select('*')
-      .eq('user_id', userId);
+      .select(`
+        *,
+        barbers:capster_id (id, name),
+        services:service_id (id, name, duration, price)
+      `)
+      .eq('user_id', userId)
+      .order('schedule', { ascending: true });
 
     if (error) throw { message: 'Failed to get bookings', statusCode: 500, details: error };
-    return data || [];
+    
+    return {
+      success: true,
+      data: data || []
+    };
   } catch (error) {
     console.error('Get user bookings error:', error);
-    error.statusCode = error.statusCode || 500;
-    throw error;
+    
+    return {
+      success: false,
+      error: {
+        message: error.message || 'Unknown error occurred',
+        statusCode: error.statusCode || 500,
+        details: error.details || null
+      }
+    };
   }
 };
 
@@ -109,7 +207,11 @@ exports.getBooking = async (bookingId, userId) => {
 
     const { data, error } = await supabase
       .from('bookings')
-      .select('*')
+      .select(`
+        *,
+        barbers:capster_id (id, name),
+        services:service_id (id, name, duration, price)
+      `)
       .eq('id', bookingId)
       .eq('user_id', userId)
       .single();
@@ -117,11 +219,21 @@ exports.getBooking = async (bookingId, userId) => {
     if (error) throw { message: 'Booking not found', statusCode: 404, details: error };
     if (!data) throw { message: 'Booking not found', statusCode: 404 };
     
-    return data;
+    return {
+      success: true,
+      data: data
+    };
   } catch (error) {
     console.error('Get booking error:', error);
-    error.statusCode = error.statusCode || 500;
-    throw error;
+    
+    return {
+      success: false,
+      error: {
+        message: error.message || 'Unknown error occurred',
+        statusCode: error.statusCode || 500,
+        details: error.details || null
+      }
+    };
   }
 };
 
@@ -131,7 +243,7 @@ exports.updateBooking = async (bookingId, userId, updateData) => {
       throw { message: 'Booking ID and User ID are required', statusCode: 400 };
     }
 
-    // Cek booking yang akan diupdate apakah ada
+    // Cek booking yang akan diupdate
     const { data: existingBooking, error: checkError } = await supabase
       .from('bookings')
       .select('*')
@@ -142,7 +254,7 @@ exports.updateBooking = async (bookingId, userId, updateData) => {
     if (checkError) throw { message: 'Failed to check booking', statusCode: 500, details: checkError };
     if (!existingBooking) throw { message: 'Booking not found', statusCode: 404 };
 
-    // Cek konflik jika mengubah capster atau schedule
+    // Jika mengupdate waktu atau barber, cek konflik
     if (updateData.capster_id || updateData.schedule) {
       const capster_id = updateData.capster_id || existingBooking.capster_id;
       const schedule = updateData.schedule || existingBooking.schedule;
@@ -173,11 +285,21 @@ exports.updateBooking = async (bookingId, userId, updateData) => {
     if (error) throw { message: 'Failed to update booking', statusCode: 500, details: error };
     if (!data || data.length === 0) throw { message: 'Booking not found', statusCode: 404 };
     
-    return data[0];
+    return {
+      success: true,
+      data: data[0]
+    };
   } catch (error) {
     console.error('Update booking error:', error);
-    error.statusCode = error.statusCode || 500;
-    throw error;
+    
+    return {
+      success: false,
+      error: {
+        message: error.message || 'Unknown error occurred',
+        statusCode: error.statusCode || 500,
+        details: error.details || null
+      }
+    };
   }
 };
 
@@ -187,7 +309,7 @@ exports.cancelBooking = async (bookingId, userId) => {
       throw { message: 'Booking ID and User ID are required', statusCode: 400 };
     }
 
-    // Cek apakah booking yang akan dihapus ada
+    // Cek booking yang akan dihapus
     const { data: existingBooking, error: checkError } = await supabase
       .from('bookings')
       .select('*')
@@ -198,18 +320,33 @@ exports.cancelBooking = async (bookingId, userId) => {
     if (checkError) throw { message: 'Failed to check booking', statusCode: 500, details: checkError };
     if (!existingBooking) throw { message: 'Booking not found', statusCode: 404 };
 
-    const { error } = await supabase
+    // Update status menjadi cancelled alih-alih delete
+    const { data, error } = await supabase
       .from('bookings')
-      .delete()
+      .update({ status: 'cancelled' })
       .eq('id', bookingId)
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .select();
 
     if (error) throw { message: 'Failed to cancel booking', statusCode: 500, details: error };
     
-    return { message: 'Booking cancelled successfully' };
+    return {
+      success: true,
+      data: {
+        message: 'Booking cancelled successfully',
+        booking: data[0]
+      }
+    };
   } catch (error) {
     console.error('Cancel booking error:', error);
-    error.statusCode = error.statusCode || 500;
-    throw error;
+    
+    return {
+      success: false,
+      error: {
+        message: error.message || 'Unknown error occurred',
+        statusCode: error.statusCode || 500,
+        details: error.details || null
+      }
+    };
   }
 };
