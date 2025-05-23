@@ -6,24 +6,46 @@ exports.createBooking = async (bookingData) => {
     console.log('Received booking data:', bookingData);
 
     // Validasi field yang diperlukan
-    if (!bookingData.capster_id || !bookingData.service_id || !bookingData.date || !bookingData.time) {
+    if (!bookingData.capster_id || !bookingData.service_ids || !bookingData.date || !bookingData.time) {
       throw { 
-        message: 'All fields are required (capster_id, service_id, date, time)',
+        message: 'All fields are required (capster_id, service_ids, date, time)',
         statusCode: 400
       };
     }
 
     // Konversi ke integer
     const capsterId = parseInt(bookingData.capster_id, 10);
-    const serviceId = parseInt(bookingData.service_id, 10);
     
     if (isNaN(capsterId)) {
       throw { message: 'capster_id must be a valid integer', statusCode: 400 };
     }
 
-    if (isNaN(serviceId)) {
-      throw { message: 'service_id must be a valid integer', statusCode: 400 };
+    // Validasi service_ids harus berupa array
+    let serviceIds;
+    if (typeof bookingData.service_ids === 'string') {
+      try {
+        serviceIds = JSON.parse(bookingData.service_ids);
+      } catch (e) {
+        throw { message: 'service_ids must be a valid JSON array', statusCode: 400 };
+      }
+    } else if (Array.isArray(bookingData.service_ids)) {
+      serviceIds = bookingData.service_ids;
+    } else {
+      throw { message: 'service_ids must be an array', statusCode: 400 };
     }
+
+    // Validasi array tidak kosong dan semua element adalah integer
+    if (!Array.isArray(serviceIds) || serviceIds.length === 0) {
+      throw { message: 'service_ids must be a non-empty array', statusCode: 400 };
+    }
+
+    const validServiceIds = serviceIds.map(id => {
+      const intId = parseInt(id, 10);
+      if (isNaN(intId)) {
+        throw { message: 'All service_ids must be valid integers', statusCode: 400 };
+      }
+      return intId;
+    });
 
     // Validasi UUID
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -43,15 +65,21 @@ exports.createBooking = async (bookingData) => {
     if (barberError) throw { message: 'Database error', statusCode: 500, details: barberError };
     if (!barber) throw { message: 'Barber not found', statusCode: 404 };
 
-    // Cek service (tanpa duration)
-    const { data: service, error: serviceError } = await supabase
+    // Cek semua services exist
+    const { data: services, error: serviceError } = await supabase
       .from('services')
-      .select('id, name') // Hanya ambil field yang diperlukan
-      .eq('id', serviceId)
-      .single();
+      .select('id, name, price, duration')
+      .in('id', validServiceIds);
 
     if (serviceError) throw { message: 'Database error', statusCode: 500, details: serviceError };
-    if (!service) throw { message: 'Service not found', statusCode: 404 };
+    if (!services || services.length !== validServiceIds.length) {
+      const foundIds = services ? services.map(s => s.id) : [];
+      const missingIds = validServiceIds.filter(id => !foundIds.includes(id));
+      throw { 
+        message: `Services not found: ${missingIds.join(', ')}`, 
+        statusCode: 404 
+      };
+    }
 
     // Cek duplikat booking
     const { count: duplicateCount, error: duplicateError } = await supabase
@@ -86,15 +114,21 @@ exports.createBooking = async (bookingData) => {
       throw { message: 'Maximum booking limit reached (2 active bookings per user)', statusCode: 429 };
     }
 
-    // Buat booking (tanpa duration dan price)
+    // Hitung total price dan duration
+    const totalPrice = services.reduce((sum, service) => sum + (service.price || 0), 0);
+    const totalDuration = services.reduce((sum, service) => sum + (service.duration || 0), 0);
+
+    // Buat booking dengan service_ids sebagai JSONB
     const { data, error: insertError } = await supabase
       .from('bookings')
       .insert([{
         user_id: bookingData.user_id,
         capster_id: capsterId,
-        service_id: serviceId,
+        service_id: validServiceIds, // Supabase akan otomatis convert array ke JSONB
         schedule: scheduleDateTime,
-        status: 'confirmed'
+        status: 'confirmed',
+        total_price: totalPrice,
+        total_duration: totalDuration
       }])
       .select();
 
@@ -106,7 +140,12 @@ exports.createBooking = async (bookingData) => {
       data: {
         booking: data[0],
         barber: { id: barber.id, name: barber.name, image: barber.image },
-        service: { id: service.id, name: service.name } // Tanpa duration
+        services: services,
+        summary: {
+          total_services: services.length,
+          total_price: totalPrice,
+          total_duration: totalDuration
+        }
       }
     };
 
@@ -131,26 +170,53 @@ exports.getBookingByUser = async (userId) => {
         id,
         schedule,
         status,
-        barber:capster_id (id, name),
-        service:service_id (id, name, price, duration)
+        service_id,
+        total_price,
+        total_duration,
+        barber:capster_id (id, name)
       `)
       .eq('user_id', userId)
-      .order('schedule', { ascending: true })
+      .order('schedule', { ascending: true });
 
     if (error) {
       throw {
         message: 'Failed to get bookings',
         statusCode: 500,
         details: error
-      }
+      };
     }
+
+    // Untuk setiap booking, ambil detail services
+    const bookingsWithServices = await Promise.all(
+      (data || []).map(async (booking) => {
+        const serviceIds = booking.service_id || [];
+        
+        if (serviceIds.length > 0) {
+          const { data: services, error: servicesError } = await supabase
+            .from('services')
+            .select('id, name, price, duration')
+            .in('id', serviceIds);
+
+          if (servicesError) {
+            console.error('Error fetching services:', servicesError);
+            booking.services = [];
+          } else {
+            booking.services = services || [];
+          }
+        } else {
+          booking.services = [];
+        }
+
+        return booking;
+      })
+    );
 
     return {
       success: true,
-      data: data || []
-    }
+      data: bookingsWithServices
+    };
   } catch (error) {
-    console.error('Service error:', error)
+    console.error('Service error:', error);
     return {
       success: false,
       error: {
@@ -158,11 +224,10 @@ exports.getBookingByUser = async (userId) => {
         statusCode: error.statusCode || 500,
         details: error.details || null
       }
-    }
+    };
   }
-}
+};
 
-// Fungsi-fungsi lainnya tetap sama...
 exports.getUserBookings = async (userId) => {
   try {
     if (!userId) {
@@ -173,17 +238,41 @@ exports.getUserBookings = async (userId) => {
       .from('bookings')
       .select(`
         *,
-        barbers:capster_id (id, name),
-        services:service_id (id, name, duration, price)
+        barbers:capster_id (id, name)
       `)
       .eq('user_id', userId)
       .order('schedule', { ascending: true });
 
     if (error) throw { message: 'Failed to get bookings', statusCode: 500, details: error };
     
+    // Untuk setiap booking, ambil detail services
+    const bookingsWithServices = await Promise.all(
+      (data || []).map(async (booking) => {
+        const serviceIds = booking.service_id || [];
+        
+        if (serviceIds.length > 0) {
+          const { data: services, error: servicesError } = await supabase
+            .from('services')
+            .select('id, name, price, duration')
+            .in('id', serviceIds);
+
+          if (servicesError) {
+            console.error('Error fetching services:', servicesError);
+            booking.services = [];
+          } else {
+            booking.services = services || [];
+          }
+        } else {
+          booking.services = [];
+        }
+
+        return booking;
+      })
+    );
+    
     return {
       success: true,
-      data: data || []
+      data: bookingsWithServices
     };
   } catch (error) {
     console.error('Get user bookings error:', error);
@@ -209,8 +298,7 @@ exports.getBooking = async (bookingId, userId) => {
       .from('bookings')
       .select(`
         *,
-        barbers:capster_id (id, name),
-        services:service_id (id, name, duration, price)
+        barbers:capster_id (id, name)
       `)
       .eq('id', bookingId)
       .eq('user_id', userId)
@@ -218,6 +306,25 @@ exports.getBooking = async (bookingId, userId) => {
 
     if (error) throw { message: 'Booking not found', statusCode: 404, details: error };
     if (!data) throw { message: 'Booking not found', statusCode: 404 };
+    
+    // Ambil detail services
+    const serviceIds = data.service_id || [];
+    
+    if (serviceIds.length > 0) {
+      const { data: services, error: servicesError } = await supabase
+        .from('services')
+        .select('id, name, price, duration')
+        .in('id', serviceIds);
+
+      if (servicesError) {
+        console.error('Error fetching services:', servicesError);
+        data.services = [];
+      } else {
+        data.services = services || [];
+      }
+    } else {
+      data.services = [];
+    }
     
     return {
       success: true,
@@ -253,6 +360,57 @@ exports.updateBooking = async (bookingId, userId, updateData) => {
 
     if (checkError) throw { message: 'Failed to check booking', statusCode: 500, details: checkError };
     if (!existingBooking) throw { message: 'Booking not found', statusCode: 404 };
+
+    // Jika mengupdate services, validasi dan hitung ulang total
+    if (updateData.service_ids) {
+      let serviceIds;
+      if (typeof updateData.service_ids === 'string') {
+        try {
+          serviceIds = JSON.parse(updateData.service_ids);
+        } catch (e) {
+          throw { message: 'service_ids must be a valid JSON array', statusCode: 400 };
+        }
+      } else if (Array.isArray(updateData.service_ids)) {
+        serviceIds = updateData.service_ids;
+      } else {
+        throw { message: 'service_ids must be an array', statusCode: 400 };
+      }
+
+      const validServiceIds = serviceIds.map(id => {
+        const intId = parseInt(id, 10);
+        if (isNaN(intId)) {
+          throw { message: 'All service_ids must be valid integers', statusCode: 400 };
+        }
+        return intId;
+      });
+
+      // Cek semua services exist
+      const { data: services, error: serviceError } = await supabase
+        .from('services')
+        .select('id, name, price, duration')
+        .in('id', validServiceIds);
+
+      if (serviceError) throw { message: 'Database error', statusCode: 500, details: serviceError };
+      if (!services || services.length !== validServiceIds.length) {
+        const foundIds = services ? services.map(s => s.id) : [];
+        const missingIds = validServiceIds.filter(id => !foundIds.includes(id));
+        throw { 
+          message: `Services not found: ${missingIds.join(', ')}`, 
+          statusCode: 404 
+        };
+      }
+
+      // Hitung ulang total
+      const totalPrice = services.reduce((sum, service) => sum + (service.price || 0), 0);
+      const totalDuration = services.reduce((sum, service) => sum + (service.duration || 0), 0);
+
+      updateData.service_id = validServiceIds;
+      updateData.total_price = totalPrice;
+      updateData.total_duration = totalDuration;
+      
+      // Remove service_ids dari updateData karena kita sudah convert ke service_id
+      delete updateData.service_ids;
+    }
 
     // Jika mengupdate waktu atau barber, cek konflik
     if (updateData.capster_id || updateData.schedule) {
