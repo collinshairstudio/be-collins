@@ -3,12 +3,17 @@ const router = express.Router();
 const bookingController = require('../controllers/bookingController');
 const { protect } = require('../middlewares/auth');
 
-// Public routes
-router.get('/services', bookingController.getAllServices);
-router.get('/capsters', bookingController.getAllCapsters);
-router.get('/available-schedules', bookingController.getAvailableSchedules);
+// ===== PUBLIC ROUTES =====
+router.get('/branches', bookingController.getAllBranches);
+// router.get('/branches/:branchId', bookingController.getBranchById);
+// router.get('/branches/:branchId/details', bookingController.getBranchWithDetails);
+// router.get('/services', bookingController.getAllServices); // ?branch_id=1 (optional)
+router.get('/branches/:branchId/services', bookingController.getServicesByBranch);
+// router.get('/capsters', bookingController.getAllCapsters); // ?branch_id=1 (optional)
+router.get('/branches/:branchId/capsters', bookingController.getCapstersByBranch);
+router.get('/available-schedules', bookingController.getAvailableSchedules); // ?capster_id=1&branch_id=1&date=2024-01-01
 
-// Protected routes
+// ===== PROTECTED ROUTES =====
 router.use(protect);
 router.post('/', bookingController.createBooking);
 router.get('/', bookingController.getUserBookings);
