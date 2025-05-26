@@ -1,5 +1,5 @@
 const supabase = require('../database');
-const moment = require('moment');
+const moment = require('moment-timezone'); // Ganti ke moment-timezone
 
 // 1. Mengambil semua branch
 exports.getAllBranches = async () => {
@@ -27,78 +27,6 @@ exports.getAllBranches = async () => {
     };
   }
 };
-
-// 2. Mengambil semua layanan/service (global atau berdasarkan branch jika ada relasi)
-// exports.getAllServices = async (branchId = null) => {
-//   try {
-//     let query = supabase
-//       .from('services')
-//       .select('*')
-//       .order('name', { ascending: true });
-
-//     // Jika ada branch_id di tabel services, uncomment line ini
-//     // if (branchId) {
-//     //   query = query.eq('branch_id', branchId);
-//     // }
-
-//     const { data, error } = await query;
-
-//     if (error) throw error;
-
-//     return {
-//       success: true,
-//       data: data || []
-//     };
-//   } catch (error) {
-//     console.error('Error getting services:', error);
-//     return {
-//       success: false,
-//       error: {
-//         message: 'Failed to fetch services',
-//         statusCode: 500,
-//         details: error.message
-//       }
-//     };
-//   }
-// };
-
-// 3. Mengambil semua capster/barber berdasarkan branch
-// exports.getAllCapsters = async (branchId = null) => {
-//   try {
-//     let query = supabase
-//       .from('capsters')
-//       .select(`
-//         id, 
-//         name, 
-//         branch_id,
-//         branch:branch_id (id, branch_name)
-//       `)
-//       .order('name', { ascending: true });
-
-//     if (branchId) {
-//       query = query.eq('branch_id', branchId);
-//     }
-
-//     const { data, error } = await query;
-
-//     if (error) throw error;
-
-//     return {
-//       success: true,
-//       data: data || []
-//     };
-//   } catch (error) {
-//     console.error('Error getting capsters:', error);
-//     return {
-//       success: false,
-//       error: {
-//         message: 'Failed to fetch capsters',
-//         statusCode: 500,
-//         details: error.message
-//       }
-//     };
-//   }
-// };
 
 // 4. Mengambil capster berdasarkan branch ID
 exports.getCapstersByBranch = async (branchId) => {
@@ -137,7 +65,7 @@ exports.getCapstersByBranch = async (branchId) => {
   }
 };
 
-// 5. Mengambil services berdasarkan branch ID (jika ada relasi)
+// 5. Mengambil services berdasarkan branch ID
 exports.getServicesByBranch = async (branchId) => {
   try {
     if (!branchId) {
@@ -187,7 +115,7 @@ exports.getAvailableSchedules = async (capsterId, branchId, date) => {
       throw new Error('Capster not found in this branch');
     }
 
-    const selectedDate = moment(date);
+    const selectedDate = moment.tz(date, 'Asia/Jakarta');
     if (!selectedDate.isValid()) {
       throw new Error('Invalid date format');
     }
@@ -206,12 +134,12 @@ exports.getAvailableSchedules = async (capsterId, branchId, date) => {
     if (bookingError) throw bookingError;
 
     const allSlots = generateTimeSlots('09:00', '18:00', 60);
-    const bookedSlots = bookings.map(b => moment(b.schedule).format('HH:mm'));
+    const bookedSlots = bookings.map(b => moment(b.schedule).tz('Asia/Jakarta').format('HH:mm'));
 
-    const now = moment();
+    const now = moment().tz('Asia/Jakarta');
     const availableSlots = allSlots.filter(slot => {
       const isBooked = bookedSlots.includes(slot.time);
-      const slotDateTime = moment(`${date} ${slot.time}`, 'YYYY-MM-DD HH:mm');
+      const slotDateTime = moment.tz(`${date} ${slot.time}`, 'YYYY-MM-DD HH:mm', 'Asia/Jakarta');
       const isFutureTime = slotDateTime.isAfter(now);
       return !isBooked && isFutureTime;
     });
@@ -240,45 +168,10 @@ exports.getAvailableSchedules = async (capsterId, branchId, date) => {
   }
 };
 
-// 8. Mengambil data lengkap branch dengan capsters dan services
-exports.getBranchWithDetails = async (branchId) => {
-  try {
-    if (!branchId) {
-      throw new Error('Branch ID is required');
-    }
-
-    const branchResult = await exports.getBranchById(branchId);
-    if (!branchResult.success) {
-      throw new Error(branchResult.error.message);
-    }
-    const capstersResult = await exports.getCapstersByBranch(branchId);
-    const servicesResult = await exports.getServicesByBranch(branchId);
-    return {
-      success: true,
-      data: {
-        branch: branchResult.data,
-        capsters: capstersResult.success ? capstersResult.data : [],
-        services: servicesResult.success ? servicesResult.data : []
-      }
-    };
-
-  } catch (error) {
-    console.error('Error getting branch with details:', error);
-    return {
-      success: false,
-      error: {
-        message: error.message || 'Failed to fetch branch details',
-        statusCode: 500,
-        details: error.details || error
-      }
-    };
-  }
-};
-
 function generateTimeSlots(startTime, endTime, interval) {
   const slots = [];
-  let currentTime = moment(startTime, 'HH:mm');
-  const end = moment(endTime, 'HH:mm');
+  let currentTime = moment.tz(startTime, 'HH:mm', 'Asia/Jakarta');
+  const end = moment.tz(endTime, 'HH:mm', 'Asia/Jakarta');
 
   while (currentTime <= end) {
     slots.push({
