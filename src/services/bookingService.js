@@ -1,5 +1,5 @@
 const supabase = require('../database');
-const moment = require('moment');
+const moment = require('moment-timezone');
 
 const validators = {
   validateRequiredFields: (bookingData) => {
@@ -66,13 +66,13 @@ const validators = {
   },
 
   validateDateTime: (date, time) => {
-    const scheduleDateTime = moment(`${date} ${time}`, 'YYYY-MM-DD h:mm A');
+    const scheduleDateTime = moment.tz(`${date} ${time}`, 'YYYY-MM-DD h:mm A', 'Asia/Jakarta');
     
     if (!scheduleDateTime.isValid()) {
       throw { message: 'Invalid date or time format', statusCode: 400 };
     }
 
-    if (scheduleDateTime.isBefore(moment())) {
+    if (scheduleDateTime.isBefore(moment().tz('Asia/Jakarta'))) {
       throw { message: 'Cannot book in the past', statusCode: 400 };
     }
 
@@ -128,9 +128,7 @@ const dbOperations = {
     return data;
   },
 
-  // Modified to check availability for multiple time slots
   checkCapsterAvailability: async (capsterId, scheduleSlots) => {
-    // Check each time slot for conflicts
     for (const slot of scheduleSlots) {
       const { count, error } = await supabase
         .from('bookings')
@@ -142,7 +140,7 @@ const dbOperations = {
       
       if (count > 0) {
         throw { 
-          message: `Barber already booked at ${moment(slot).format('h:mm A')}`, 
+          message: `Barber already booked at ${moment.tz(slot, 'Asia/Jakarta').format('h:mm A')}`, 
           statusCode: 409,
           details: { capster_id: capsterId, conflicting_schedule: slot }
         };
@@ -157,7 +155,7 @@ const dbOperations = {
       .from('bookings')
       .select('*', { count: 'exact' })
       .eq('user_id', userId)
-      .gte('schedule', moment().startOf('day').toISOString());
+      .gte('schedule', moment().tz('Asia/Jakarta').startOf('day').toISOString());
 
     if (error) throw { message: 'Database error', statusCode: 500, details: error };
     
@@ -166,7 +164,6 @@ const dbOperations = {
     }
   },
 
-  // Create multiple bookings for long duration services
   createMultipleBookings: async (bookingDataArray) => {
     const { data, error } = await supabase
       .from('bookings')
@@ -238,13 +235,12 @@ const bookingHelpers = {
     };
   },
 
-  // Generate time slots based on total duration (existing columns only)
   generateTimeSlots: (startDateTime, totalDuration) => {
     const slots = [];
     const slotDuration = 60; // 1 hour per slot in minutes
     const numberOfSlots = Math.ceil(totalDuration / slotDuration);
     
-    let currentTime = moment(startDateTime);
+    let currentTime = moment.tz(startDateTime, 'Asia/Jakarta');
     
     for (let i = 0; i < numberOfSlots; i++) {
       slots.push(currentTime.toISOString());
@@ -254,7 +250,6 @@ const bookingHelpers = {
     return slots;
   },
 
-  // Create booking data for multiple slots (using existing columns only)
   createBookingDataArray: (baseBookingData, timeSlots) => {
     return timeSlots.map((slot) => ({
       ...baseBookingData,
@@ -267,7 +262,7 @@ const bookingHelpers = {
     const timeSlots = bookings.map((b, index) => ({
       schedule: b.schedule,
       sequence: index + 1,
-      formatted_time: moment(b.schedule).format('h:mm A')
+      formatted_time: moment.tz(b.schedule, 'Asia/Jakarta').format('h:mm A')
     }));
     
     return {
@@ -284,8 +279,8 @@ const bookingHelpers = {
           total_duration: totalDuration,
           total_hours: Math.ceil(totalDuration / 60),
           time_slots_count: timeSlots.length,
-          start_time: moment(timeSlots[0].schedule).format('h:mm A'),
-          end_time: moment(timeSlots[timeSlots.length - 1].schedule).add(1, 'hour').format('h:mm A')
+          start_time: moment.tz(timeSlots[0].schedule, 'Asia/Jakarta').format('h:mm A'),
+          end_time: moment.tz(timeSlots[timeSlots.length - 1].schedule, 'Asia/Jakarta').add(1, 'hour').format('h:mm A')
         }
       }
     };
@@ -318,7 +313,8 @@ exports.createBooking = async (bookingData) => {
     // Generate time slots based on duration
     const timeSlots = bookingHelpers.generateTimeSlots(scheduleDateTime, totalDuration);
     
-    console.log('Generated time slots:', timeSlots.map(slot => moment(slot).format('YYYY-MM-DD h:mm A')));
+    console.log('Generated time slots:', timeSlots.map(slot => 
+      moment.tz(slot, 'Asia/Jakarta').format('YYYY-MM-DD h:mm A')));
     
     // Check availability for all time slots
     await dbOperations.checkCapsterAvailability(capsterId, timeSlots);
