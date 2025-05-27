@@ -128,16 +128,28 @@ const dbOperations = {
     return data;
   },
 
-  checkCapsterAvailability: async (capsterId, scheduleDateTime) => {
-    const { count, error } = await supabase
-      .from('bookings')
-      .select('*', { count: 'exact' })
-      .eq('capster_id', capsterId)
-      .eq('schedule', scheduleDateTime);
+  // Modified to check availability for multiple time slots
+  checkCapsterAvailability: async (capsterId, scheduleSlots) => {
+    // Check each time slot for conflicts
+    for (const slot of scheduleSlots) {
+      const { count, error } = await supabase
+        .from('bookings')
+        .select('*', { count: 'exact' })
+        .eq('capster_id', capsterId)
+        .eq('schedule', slot);
 
-    if (error) throw { message: 'Database error', statusCode: 500, details: error };
+      if (error) throw { message: 'Database error', statusCode: 500, details: error };
+      
+      if (count > 0) {
+        throw { 
+          message: `Barber already booked at ${moment(slot).format('h:mm A')}`, 
+          statusCode: 409,
+          details: { capster_id: capsterId, conflicting_schedule: slot }
+        };
+      }
+    }
     
-    return count === 0;
+    return true;
   },
 
   checkUserBookingLimit: async (userId) => {
@@ -152,6 +164,19 @@ const dbOperations = {
     if (count >= 2) {
       throw { message: 'Maximum booking limit reached (2 active bookings per user)', statusCode: 429 };
     }
+  },
+
+  // Create multiple bookings for long duration services
+  createMultipleBookings: async (bookingDataArray) => {
+    const { data, error } = await supabase
+      .from('bookings')
+      .insert(bookingDataArray)
+      .select();
+
+    if (error) throw { message: 'Failed to create bookings', statusCode: 500, details: error };
+    if (!data || data.length === 0) throw { message: 'No data returned after insert', statusCode: 500 };
+    
+    return data;
   },
 
   createBooking: async (bookingData) => {
@@ -213,20 +238,54 @@ const bookingHelpers = {
     };
   },
 
-  formatBookingResponse: (booking, barber, branch, services) => {
+  // Generate time slots based on total duration (existing columns only)
+  generateTimeSlots: (startDateTime, totalDuration) => {
+    const slots = [];
+    const slotDuration = 60; // 1 hour per slot in minutes
+    const numberOfSlots = Math.ceil(totalDuration / slotDuration);
+    
+    let currentTime = moment(startDateTime);
+    
+    for (let i = 0; i < numberOfSlots; i++) {
+      slots.push(currentTime.toISOString());
+      currentTime = currentTime.clone().add(1, 'hour');
+    }
+    
+    return slots;
+  },
+
+  // Create booking data for multiple slots (using existing columns only)
+  createBookingDataArray: (baseBookingData, timeSlots) => {
+    return timeSlots.map((slot) => ({
+      ...baseBookingData,
+      schedule: slot
+    }));
+  },
+
+  formatBookingResponse: (bookings, barber, branch, services) => {
     const { totalPrice, totalDuration } = bookingHelpers.calculateTotals(services);
+    const timeSlots = bookings.map((b, index) => ({
+      schedule: b.schedule,
+      sequence: index + 1,
+      formatted_time: moment(b.schedule).format('h:mm A')
+    }));
     
     return {
       success: true,
       data: {
-        booking,
+        bookings: bookings,
+        time_slots: timeSlots,
         barber: { id: barber.id, name: barber.name, image: barber.image },
         branch: { id: branch.id, name: branch.branch_name },
         services,
         summary: {
           total_services: services.length,
           total_price: totalPrice,
-          total_duration: totalDuration
+          total_duration: totalDuration,
+          total_hours: Math.ceil(totalDuration / 60),
+          time_slots_count: timeSlots.length,
+          start_time: moment(timeSlots[0].schedule).format('h:mm A'),
+          end_time: moment(timeSlots[timeSlots.length - 1].schedule).add(1, 'hour').format('h:mm A')
         }
       }
     };
@@ -237,37 +296,66 @@ const bookingHelpers = {
 exports.createBooking = async (bookingData) => {
   try {
     console.log('Received booking data:', bookingData);
+    
+    // Validate input data
     validators.validateRequiredFields(bookingData);
     validators.validateUserId(bookingData.user_id);
     const capsterId = validators.validateCapsterId(bookingData.capster_id);
     const branchId = validators.validateBranchId(bookingData.branch_id);
     const serviceIds = validators.validateServiceIds(bookingData.service_ids);
     const scheduleDateTime = validators.validateDateTime(bookingData.date, bookingData.time);
+    
+    // Fetch related data
     const branch = await dbOperations.findBranch(branchId);
     const barber = await dbOperations.findCapster(capsterId, branchId);
     const services = await dbOperations.findServices(serviceIds);
-    const isAvailable = await dbOperations.checkCapsterAvailability(capsterId, scheduleDateTime);
-    if (!isAvailable) {
-      throw { 
-        message: 'Barber already booked at this time', 
-        statusCode: 409,
-        details: { capster_id: capsterId, schedule: scheduleDateTime }
-      };
-    }
-    await dbOperations.checkUserBookingLimit(bookingData.user_id);
+    
+    // Calculate totals
     const { totalPrice, totalDuration } = bookingHelpers.calculateTotals(services);
-    const booking = await dbOperations.createBooking({
+    
+    console.log(`Total duration: ${totalDuration} minutes`);
+    
+    // Generate time slots based on duration
+    const timeSlots = bookingHelpers.generateTimeSlots(scheduleDateTime, totalDuration);
+    
+    console.log('Generated time slots:', timeSlots.map(slot => moment(slot).format('YYYY-MM-DD h:mm A')));
+    
+    // Check availability for all time slots
+    await dbOperations.checkCapsterAvailability(capsterId, timeSlots);
+    
+    // Check user booking limit
+    await dbOperations.checkUserBookingLimit(bookingData.user_id);
+    
+    // Prepare booking data
+    const baseBookingData = {
       user_id: bookingData.user_id,
       capster_id: capsterId,
       branch_id: branchId,
       service_id: serviceIds,
-      schedule: scheduleDateTime,
       status: 'confirmed',
       total_price: totalPrice,
       total_duration: totalDuration
-    });
+    };
+    
+    let createdBookings;
+    
+    if (timeSlots.length === 1) {
+      // Single booking for services under 1 hour
+      const singleBookingData = {
+        ...baseBookingData,
+        schedule: timeSlots[0],
+        booking_type: 'single',
+        slot_sequence: 1
+      };
+      
+      createdBookings = [await dbOperations.createBooking(singleBookingData)];
+    } else {
+      // Multiple bookings for services over 1 hour
+      const bookingDataArray = bookingHelpers.createBookingDataArray(baseBookingData, timeSlots);
+      createdBookings = await dbOperations.createMultipleBookings(bookingDataArray);
+    }
 
-    return bookingHelpers.formatBookingResponse(booking, barber, branch, services);
+    return bookingHelpers.formatBookingResponse(createdBookings, barber, branch, services);
 
   } catch (error) {
     console.error('Booking error:', error);
